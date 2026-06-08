@@ -42,6 +42,14 @@ def watering_events(unit):
     return proxy_get(f"/actuation/{unit}/watering_events")
 
 
+@app.route("/api/actuation/<unit>/update_schedule", methods=["PUT"])
+def update_schedule(unit):
+    r = requests.put(f"{CONTROLLER_API}/actuation/{unit}/update_schedule",
+                     json=request.get_json())
+    return Response(r.content, status=r.status_code,
+                    content_type=r.headers.get("content-type", "application/json"))
+
+
 @app.route("/")
 def dashboard():
     return DASHBOARD_HTML
@@ -84,6 +92,41 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .stat-card .value { font-size: 1.6rem; font-weight: 700; }
   .stat-card .unit { font-size: 0.8rem; color: #666; }
   .plot { width: 100%; height: 280px; }
+  #water-now-btn { background: #4caf50; color: #fff; border: none; border-radius: 4px;
+    padding: 6px 16px; cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+  #water-now-btn:hover { background: #66bb6a; }
+  #water-now-btn:disabled { background: #555; color: #888; cursor: not-allowed; }
+  #watering-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.82);
+    align-items: center; justify-content: center; z-index: 1000; }
+  .watering-modal { background: #16213e; border-radius: 12px; padding: 32px 36px;
+    max-width: 440px; width: 90%; text-align: center; border: 1px solid #2a2a4a; }
+  .watering-modal h2 { font-size: 1.15rem; margin-bottom: 16px; color: #e0e0e0; }
+  .watering-modal .status { font-size: 0.95rem; color: #aaa; margin-bottom: 16px;
+    min-height: 2.5em; line-height: 1.4; }
+  .watering-modal .spinner { width: 32px; height: 32px; border: 3px solid #2a2a4a;
+    border-top-color: #4fc3f7; border-radius: 50%; animation: spin 0.8s linear infinite;
+    margin: 0 auto 16px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .watering-modal .result-icon { font-size: 2.5rem; margin-bottom: 8px; }
+  .watering-modal button.close-btn { background: #4fc3f7; color: #1a1a2e; border: none;
+    border-radius: 4px; padding: 8px 24px; cursor: pointer; font-size: 0.9rem;
+    font-weight: 600; margin-top: 8px; }
+  .watering-modal button.close-btn:hover { background: #81d4fa; }
+  .dose-row { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+  .dose-row input[type="range"] { flex: 1; accent-color: #4fc3f7; }
+  .dose-row input[type="number"] { width: 80px; background: #1a1a2e; color: #e0e0e0;
+    border: 1px solid #3a3a5a; border-radius: 4px; padding: 6px 8px; font-size: 0.95rem;
+    text-align: center; -moz-appearance: textfield; }
+  .dose-row input[type="number"]:focus { outline: none; border-color: #4fc3f7; }
+  .dose-row .unit-label { color: #888; font-size: 0.9rem; }
+  .picker-btns { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }
+  .picker-btns button { border: none; border-radius: 4px; padding: 8px 24px;
+    cursor: pointer; font-size: 0.9rem; font-weight: 600; }
+  .picker-btns .cancel-btn { background: #2a2a4a; color: #aaa; }
+  .picker-btns .cancel-btn:hover { background: #3a3a5a; }
+  .picker-btns .go-btn { background: #4caf50; color: #fff; }
+  .picker-btns .go-btn:hover { background: #66bb6a; }
+  .picker-error { color: #f44336; font-size: 0.85rem; min-height: 1.2em; margin-top: 8px; }
   @media (max-width: 900px) {
     .grid { grid-template-columns: 1fr; }
     .stats-row { grid-template-columns: repeat(2, 1fr); }
@@ -95,6 +138,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <header>
   <h1>Plant Controller Dashboard</h1>
   <div class="header-right">
+    <button id="water-now-btn" onclick="waterNow()">Water Now</button>
     <div class="window-btns">
       <button class="active" data-minutes="30">30 min</button>
       <button data-minutes="240">4 hours</button>
@@ -154,6 +198,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="card">
     <h2>Watering History</h2>
     <div id="plot-watering" class="plot"></div>
+  </div>
+</div>
+
+<div id="watering-overlay">
+  <div class="watering-modal">
+    <h2>Ad Hoc Watering</h2>
+    <div id="watering-picker">
+      <div class="dose-row">
+        <input type="range" id="dose-slider" min="0" max="500" value="100">
+        <input type="number" id="dose-input" min="0" step="1" value="100">
+        <span class="unit-label">ml</span>
+      </div>
+      <div id="picker-error" class="picker-error"></div>
+      <div class="picker-btns">
+        <button class="cancel-btn" onclick="closeWateringOverlay()">Cancel</button>
+        <button class="go-btn" onclick="startWatering()">Water</button>
+      </div>
+    </div>
+    <div id="watering-progress" style="display:none">
+      <div id="watering-result-icon" class="result-icon"></div>
+      <div id="watering-spinner" class="spinner"></div>
+      <p id="watering-status" class="status">Starting...</p>
+      <button id="watering-close" class="close-btn" onclick="closeWateringOverlay()">Close</button>
+    </div>
   </div>
 </div>
 
@@ -357,6 +425,140 @@ async function update() {
     document.getElementById("status").innerHTML =
       `<span class="dot" style="background:#f44336"></span>Error: ${err.message}`;
   }
+}
+
+function waterNow() {
+  document.getElementById("watering-picker").style.display = "block";
+  document.getElementById("watering-progress").style.display = "none";
+  document.getElementById("picker-error").textContent = "";
+  document.getElementById("dose-slider").value = 100;
+  document.getElementById("dose-input").value = 100;
+  document.getElementById("watering-overlay").style.display = "flex";
+}
+
+document.getElementById("dose-slider").addEventListener("input", function() {
+  document.getElementById("dose-input").value = this.value;
+  document.getElementById("picker-error").textContent = "";
+});
+document.getElementById("dose-input").addEventListener("input", function() {
+  document.getElementById("picker-error").textContent = "";
+  const v = parseInt(this.value);
+  if (!isNaN(v) && v >= 0) document.getElementById("dose-slider").value = Math.min(v, 500);
+});
+
+function startWatering() {
+  const raw = document.getElementById("dose-input").value.trim();
+  const num = Number(raw);
+  if (raw === "" || isNaN(num) || num < 0 || !Number.isInteger(num)) {
+    document.getElementById("picker-error").textContent = "Enter a valid integer (0 or above).";
+    return;
+  }
+  if (num > 500 && !confirm("Dose is " + num + "ml (above 500ml). Are you sure?")) return;
+  runWatering(num);
+}
+
+async function runWatering(dose) {
+  const btn = document.getElementById("water-now-btn");
+  btn.disabled = true;
+  document.getElementById("watering-picker").style.display = "none";
+  const progress = document.getElementById("watering-progress");
+  const statusEl = document.getElementById("watering-status");
+  const spinnerEl = document.getElementById("watering-spinner");
+  const iconEl = document.getElementById("watering-result-icon");
+  const closeBtn = document.getElementById("watering-close");
+
+  progress.style.display = "block";
+  spinnerEl.style.display = "block";
+  iconEl.style.display = "none";
+  closeBtn.style.display = "none";
+  statusEl.textContent = "Starting\u2026";
+
+  let savedSchedule = null;
+  let scheduleModified = false;
+  const p2 = (n) => String(n).padStart(2, "0");
+
+  function finish(ok, msg) {
+    spinnerEl.style.display = "none";
+    iconEl.style.display = "block";
+    iconEl.textContent = ok ? "\u2713" : "\u2717";
+    iconEl.style.color = ok ? "#4caf50" : "#f44336";
+    statusEl.textContent = msg;
+    closeBtn.style.display = "inline-block";
+    btn.disabled = false;
+  }
+
+  async function restoreSchedule() {
+    if (!scheduleModified || !savedSchedule) return true;
+    try {
+      const r = await fetch("/api/actuation/purple_ufo/update_schedule", {
+        method: "PUT", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(savedSchedule)
+      });
+      scheduleModified = false;
+      return r.ok;
+    } catch(e) { return false; }
+  }
+
+  try {
+    // Step 1: Read current schedule
+    statusEl.textContent = "Reading current watering schedule\u2026";
+    savedSchedule = await fetchJSON("/api/actuation/purple_ufo/show_schedule");
+
+    // Step 2: Compute target time (now + 15 seconds)
+    const targetTime = new Date(Date.now() + 15000);
+    const timeStr = p2(targetTime.getHours()) + ":" + p2(targetTime.getMinutes()) + ":" + p2(targetTime.getSeconds());
+
+    // Step 3: Upload temporary schedule
+    statusEl.textContent = "Uploading temporary schedule (" + dose + "ml at " + timeStr + ")\u2026";
+    const putR = await fetch("/api/actuation/purple_ufo/update_schedule", {
+      method: "PUT", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({type: "daily", schedule: [{time: timeStr, dose: dose}]})
+    });
+    if (!putR.ok) throw new Error("Failed to upload schedule (HTTP " + putR.status + ")");
+    scheduleModified = true;
+
+    // Step 4: Poll for watering event (only events after schedule was uploaded)
+    const pollStart = Date.now();
+    const sd = new Date(pollStart);
+    const sinceStr = "" + sd.getFullYear() + p2(sd.getMonth()+1) + p2(sd.getDate()) + "-" + p2(sd.getHours()) + p2(sd.getMinutes()) + p2(sd.getSeconds());
+    let found = false;
+
+    while (Date.now() - pollStart < 45000) {
+      const elapsed = Math.round((Date.now() - pollStart) / 1000);
+      statusEl.textContent = "Waiting for watering event\u2026 (" + elapsed + "s / 45s)";
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        const events = await fetchJSON("/api/actuation/purple_ufo/watering_events?since_timestamp=" + sinceStr);
+        for (const ev of events) {
+          if (ev.value === dose && Math.abs(new Date(ev.time).getTime() - targetTime.getTime()) < 30000) {
+            found = true; break;
+          }
+        }
+      } catch(e) {}
+      if (found) break;
+    }
+
+    // Step 5: Restore original schedule
+    statusEl.textContent = (found ? "Watering detected! " : "Timeout. ") + "Restoring original schedule\u2026";
+    const restored = await restoreSchedule();
+
+    if (!restored) {
+      finish(false, "WARNING: Failed to restore original schedule. Manual intervention required.");
+    } else if (found) {
+      finish(true, "Watering completed successfully. Original schedule restored.");
+    } else {
+      finish(false, "No watering event detected within 45 seconds. Original schedule restored.");
+    }
+
+  } catch(err) {
+    const restored = await restoreSchedule();
+    const extra = restored ? " Original schedule restored." : " WARNING: Failed to restore schedule!";
+    finish(false, "Error: " + err.message + "." + extra);
+  }
+}
+
+function closeWateringOverlay() {
+  document.getElementById("watering-overlay").style.display = "none";
 }
 
 update();
